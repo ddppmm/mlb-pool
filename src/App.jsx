@@ -110,6 +110,33 @@ function expectedGamesToComplete(missing) {
   return Math.round(expected);
 }
 
+
+// ── Pool-level: expected games until SOMEONE wins ─────────────────────
+// P(pool has a winner by game G) = 1 - P(NO team complete by G)
+//   = 1 - product over all teams of (1 - P(team complete by G))
+// E[days to winner] = sum_{G=0}^{inf} P(no winner yet by G)
+function expectedDaysToWinner(scoresMap) {
+  const allMissing = POOL_TEAMS.map(({ team }) => {
+    const hit = scoresMap[team] || new Set();
+    return ALL_RUNS.filter(r => !hit.has(r));
+  });
+
+  // Check if already won
+  if (allMissing.some(m => m.length === 0)) return 0;
+
+  let expected = 0;
+  for (let G = 0; G < 600; G++) {
+    // P(no team done by G) = product of (1 - P(team done by G))
+    let pNoWinner = 1;
+    for (const missing of allMissing) {
+      pNoWinner *= (1 - pCompleteBy(missing, G));
+    }
+    expected += pNoWinner;
+    if (G > 30 && pNoWinner < 1e-6) break;
+  }
+  return Math.round(expected);
+}
+
 function calcWinProbs(scoresMap) {
   // Pre-compute missing list per team
   const teamMissing = {};
@@ -340,7 +367,10 @@ export default function App() {
     });
   }, [scores, winProbs]);
 
-  const runCoverage  = ALL_RUNS.map(r => ({ run: r, teams: POOL_TEAMS.filter(({ team }) => scores[team]?.has(r)) }));
+  const runCoverage    = ALL_RUNS.map(r => ({ run: r, teams: POOL_TEAMS.filter(({ team }) => scores[team]?.has(r)) }));
+  const daysToWinner   = useMemo(() => expectedDaysToWinner(scores), [scores]);
+  // Games behind = team's expGames minus the leader's expGames (best/lowest)
+  const leaderExpGames = Math.min(...teamStats.filter(t => !t.done).map(t => t.expGames), 9999);
   const winner       = teamStats.find(t => t.done);
   const liveList     = Object.entries(liveNow);
   const displayTeams = filter === "ALL" ? POOL_TEAMS : POOL_TEAMS.filter(t => t.owner === filter);
@@ -357,7 +387,7 @@ export default function App() {
           <span style={{ fontSize: 28 }}>⚾</span>
           <div>
             <div style={S.ttl}>13-Run Pool</div>
-            <div style={S.sub}>MLB 2026 · Started April 17</div>
+            <div style={S.sub}>MLB 2026 · Started April 17{daysToWinner > 0 ? ` · ${daysToWinner}g est. to win` : ""}</div>
           </div>
         </div>
         <div style={S.hdrR}>
@@ -413,7 +443,7 @@ export default function App() {
       {tab === "leaderboard" && (
         <div style={S.body}>
           <div style={S.modelNote}>
-            📊 <strong>Win %</strong> is calculated exactly using historical MLB run frequencies. Scores of 3–5 runs are most common (~13% each). Scores of 0, 11, 12, and 13 are rare — teams missing those face a steep uphill climb.
+            📊 <strong>Win %</strong> uses exact math from historical MLB run frequencies. <strong>GB</strong> = games behind the pool leader's expected finish. Header shows expected games until someone wins across all 30 teams.
           </div>
           <div style={S.cardGrid}>
             {teamStats.map((t, idx) => {
@@ -449,7 +479,10 @@ export default function App() {
                       </div>
                       {!t.done && (
                         <div style={{ marginTop: 4, fontSize: 10, color: "#64748b" }}>
-                          ~<span style={{ color: "#cbd5e1", fontWeight: 700 }}>{t.expGames}</span> games to finish
+                          {t.expGames === leaderExpGames
+                            ? <><span style={{ color: "#facc15", fontWeight: 700 }}>🏃 leader</span><span style={{ color: "#94a3b8" }}> · {daysToWinner}g est. to win</span></>
+                            : <><span style={{ color: "#f87171", fontWeight: 700 }}>+{t.expGames - leaderExpGames}</span> games behind leader</>
+                          }
                         </div>
                       )}
                     </div>
@@ -500,7 +533,7 @@ export default function App() {
                   ))}
                   <th style={S.th}>✓</th>
                   <th style={{ ...S.th, minWidth: 52 }}>Win%</th>
-                  <th style={{ ...S.th, minWidth: 52 }}>~Games</th>
+                  <th style={{ ...S.th, minWidth: 52 }} title="Games behind pool leader">GB</th>
                   <th style={{ ...S.th, minWidth: 55 }}>Live</th>
                 </tr>
               </thead>
@@ -534,7 +567,10 @@ export default function App() {
                       ))}
                       <td style={{ ...S.td, fontWeight: 700, color: "#facc15", fontSize: 11 }}>{hit.size}</td>
                       <td style={S.td}><WinBadge prob={wp} /></td>
-                      <td style={{ ...S.td, color: "#94a3b8", fontSize: 10, fontWeight: 600 }}>{teamStats.find(t => t.team === team)?.expGames ?? "—"}</td>
+                      {(() => { const ts = teamStats.find(t => t.team === team); const gb = ts ? (ts.done ? 0 : ts.expGames - leaderExpGames) : null; return (
+                      <td style={{ ...S.td, fontSize: 10, fontWeight: 600, color: gb === 0 ? "#facc15" : "#94a3b8" }}>
+                        {ts?.done ? "✓" : gb === 0 ? `${daysToWinner}g est.` : gb != null ? `+${gb}` : "—"}
+                      </td>); })()}
                       <td style={S.td}>
                         {lg
                           ? <span style={{ color: "#fbbf24", fontSize: 10, fontWeight: 700 }}>{lg.score} <span style={{ color: "#475569" }}>{lg.half?.slice(0,3)}{lg.inning}</span></span>
