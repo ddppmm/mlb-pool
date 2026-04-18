@@ -73,40 +73,99 @@ const RUN_FREQ = {
 const EXP_GAMES = {}; // expected games to first hit each run value
 ALL_RUNS.forEach(r => { EXP_GAMES[r] = Math.round(1 / RUN_FREQ[r]); });
 
-// ── Monte Carlo win probability ───────────────────────────────────────
-const SIMS       = 5000;
+// ── Deterministic win probability ────────────────────────────────────
+// For each team, P(complete within G games) = product over missing values of
+// (1 - (1-p)^G)  — the CDF of the max of independent geometric RVs.
+// Win probability = integral over G of:
+//   P(team completes on game G) * P(every other team NOT complete by game G)
+// We sum this over G = 1..GAMES_LEFT discretely. Exact, no randomness.
 const GAMES_LEFT = 145;
 
-function simulateWinProbs(scoresMap) {
-  const wins = {};
-  POOL_TEAMS.forEach(({ team }) => { wins[team] = 0; });
+function pCompleteBy(missing, G) {
+  // Probability ALL missing values have been hit at least once in G games
+  let p = 1;
+  for (const r of missing) {
+    const pHit = RUN_FREQ[r] ?? 0.004;
+    p *= (1 - Math.pow(1 - pHit, G));
+  }
+  return p;
+}
 
-  for (let s = 0; s < SIMS; s++) {
-    const finishOn = {};
-    for (const { team } of POOL_TEAMS) {
-      const hit     = scoresMap[team] || new Set();
-      const missing = ALL_RUNS.filter(r => !hit.has(r));
-      if (missing.length === 0) { finishOn[team] = 0; continue; }
-      let last = 0;
-      for (const r of missing) {
-        const p = RUN_FREQ[r];
-        const u = Math.random() || 1e-10;
-        const g = Math.ceil(Math.log(u) / Math.log(1 - p));
-        if (g > last) last = g;
-      }
-      finishOn[team] = last;
-    }
-    let best = Infinity, winner = null;
-    for (const { team } of POOL_TEAMS) {
-      const g = finishOn[team];
-      if (g <= GAMES_LEFT && g < best) { best = g; winner = team; }
-    }
-    if (winner) wins[winner]++;
+
+// ── Expected games to complete ────────────────────────────────────────
+// E[max of independent geometrics] via the formula:
+// E[max] = sum_{G=0}^{inf} P(max > G) = sum_{G=0}^{inf} (1 - P(all done by G))
+// We truncate at 500 games (well beyond any realistic season).
+function expectedGamesToComplete(missing) {
+  if (missing.length === 0) return 0;
+  let expected = 0;
+  // Sum P(not all done by G) for G = 0, 1, 2, ...
+  // = sum (1 - product_r (1-(1-p_r)^G))
+  // Truncate when contribution becomes negligible
+  for (let G = 0; G < 600; G++) {
+    const pDone = pCompleteBy(missing, G);
+    expected += (1 - pDone);
+    if (G > 50 && (1 - pDone) < 1e-6) break;
+  }
+  return Math.round(expected);
+}
+
+function calcWinProbs(scoresMap) {
+  // Pre-compute missing list per team
+  const teamMissing = {};
+  for (const { team } of POOL_TEAMS) {
+    const hit = scoresMap[team] || new Set();
+    teamMissing[team] = ALL_RUNS.filter(r => !hit.has(r));
   }
 
+  const winProb = {};
+  POOL_TEAMS.forEach(({ team }) => { winProb[team] = 0; });
+
+  // For already-complete teams
+  const doneTeams = POOL_TEAMS.filter(({ team }) => teamMissing[team].length === 0);
+  if (doneTeams.length > 0) {
+    // Split evenly among done teams (tiebreak — first to finish wins, but we don't track order)
+    const share = 100 / doneTeams.length;
+    doneTeams.forEach(({ team }) => { winProb[team] = Math.round(share * 10) / 10; });
+    return winProb;
+  }
+
+  // Discrete sum: for each game G, compute P(team i finishes exactly on G AND leads all others)
+  // P(finish on exactly G) = P(complete by G) - P(complete by G-1)
+  // P(team wins on game G) = P(i finishes on G) * P(all others NOT done by G-1)
+  // We accumulate over G = 1..GAMES_LEFT
+  const prevComplete = {};
+  POOL_TEAMS.forEach(({ team }) => { prevComplete[team] = 0; });
+
+  for (let G = 1; G <= GAMES_LEFT; G++) {
+    const curComplete = {};
+    for (const { team } of POOL_TEAMS) {
+      curComplete[team] = pCompleteBy(teamMissing[team], G);
+    }
+
+    for (const { team } of POOL_TEAMS) {
+      // P(this team finishes on exactly game G)
+      const pFinishOnG = curComplete[team] - prevComplete[team];
+      if (pFinishOnG < 1e-10) continue;
+
+      // P(all other teams not yet done by game G-1)
+      let pOthersNotDone = 1;
+      for (const { team: other } of POOL_TEAMS) {
+        if (other === team) continue;
+        pOthersNotDone *= (1 - prevComplete[other]);
+      }
+
+      winProb[team] += pFinishOnG * pOthersNotDone;
+    }
+
+    POOL_TEAMS.forEach(({ team }) => { prevComplete[team] = curComplete[team]; });
+  }
+
+  // Normalize to percentages, round to 1 decimal
+  const total = Object.values(winProb).reduce((a, b) => a + b, 0);
   const out = {};
   POOL_TEAMS.forEach(({ team }) => {
-    out[team] = Math.round((wins[team] / SIMS) * 1000) / 10;
+    out[team] = total > 0 ? Math.round((winProb[team] / total) * 1000) / 10 : 0;
   });
   return out;
 }
@@ -262,7 +321,7 @@ export default function App() {
     setScores(prev => { const n = new Set(prev[team]); n.delete(run); return { ...prev, [team]: n }; });
 
   // ── Derived ───────────────────────────────────────────────────────
-  const winProbs = useMemo(() => simulateWinProbs(scores), [scores]);
+  const winProbs = useMemo(() => calcWinProbs(scores), [scores]);
 
   const teamStats = useMemo(() => {
     return POOL_TEAMS.map(({ team, owner }) => {
@@ -272,7 +331,8 @@ export default function App() {
         team, owner, hit, missing,
         pct:     Math.round((hit.size / 14) * 100),
         done:    missing.length === 0,
-        winProb: winProbs[team] ?? 0,
+        winProb:  winProbs[team] ?? 0,
+        expGames: expectedGamesToComplete(missing),
       };
     }).sort((a, b) => {
       if (a.done !== b.done) return a.done ? -1 : 1;
@@ -353,7 +413,7 @@ export default function App() {
       {tab === "leaderboard" && (
         <div style={S.body}>
           <div style={S.modelNote}>
-            📊 <strong>Win %</strong> is a Monte Carlo simulation ({SIMS.toLocaleString()} runs) based on historical MLB run frequencies. Scores of 3–5 runs are most common (~13% each). Scores of 0, 11, 12, and 13 are rare — teams missing those face a steep uphill climb.
+            📊 <strong>Win %</strong> is calculated exactly using historical MLB run frequencies. Scores of 3–5 runs are most common (~13% each). Scores of 0, 11, 12, and 13 are rare — teams missing those face a steep uphill climb.
           </div>
           <div style={S.cardGrid}>
             {teamStats.map((t, idx) => {
@@ -387,6 +447,11 @@ export default function App() {
                       <div style={S.prog}>
                         <div style={{ ...S.progFill, width: `${t.pct}%`, background: t.done ? "#22c55e" : `hsl(${hue},60%,44%)` }} />
                       </div>
+                      {!t.done && (
+                        <div style={{ marginTop: 4, fontSize: 10, color: "#64748b" }}>
+                          ~<span style={{ color: "#cbd5e1", fontWeight: 700 }}>{t.expGames}</span> games to finish
+                        </div>
+                      )}
                     </div>
                   </div>
 
@@ -435,6 +500,7 @@ export default function App() {
                   ))}
                   <th style={S.th}>✓</th>
                   <th style={{ ...S.th, minWidth: 52 }}>Win%</th>
+                  <th style={{ ...S.th, minWidth: 52 }}>~Games</th>
                   <th style={{ ...S.th, minWidth: 55 }}>Live</th>
                 </tr>
               </thead>
@@ -468,6 +534,7 @@ export default function App() {
                       ))}
                       <td style={{ ...S.td, fontWeight: 700, color: "#facc15", fontSize: 11 }}>{hit.size}</td>
                       <td style={S.td}><WinBadge prob={wp} /></td>
+                      <td style={{ ...S.td, color: "#94a3b8", fontSize: 10, fontWeight: 600 }}>{teamStats.find(t => t.team === team)?.expGames ?? "—"}</td>
                       <td style={S.td}>
                         {lg
                           ? <span style={{ color: "#fbbf24", fontSize: 10, fontWeight: 700 }}>{lg.score} <span style={{ color: "#475569" }}>{lg.half?.slice(0,3)}{lg.inning}</span></span>
