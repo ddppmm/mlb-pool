@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 
 // ── Pool roster ───────────────────────────────────────────────────────
 const POOL_TEAMS = [
@@ -65,81 +65,6 @@ const TEAM_COLORS = {
 const allOwners = [...new Set(POOL_TEAMS.map(t => t.owner))].sort();
 const ownerHues = {};
 allOwners.forEach((o, i) => { ownerHues[o] = Math.round((i / allOwners.length) * 360); });
-
-// ── Run frequency distribution ────────────────────────────────────────
-// Empirical probability a team scores exactly N runs in a game.
-// Derived from Fangraphs/Retrosheet data (2000-2024, ~4.5 R/G avg).
-// Sources: tht.fangraphs.com/runs-per-game, stats.seandolinar.com
-// 13 is capped (represents 13+). Values sum to ~1.0.
-const RUN_FREQ = {
-  0:  0.073,   // shutout — less common than you'd think (~7.3%)
-  1:  0.103,
-  2:  0.122,
-  3:  0.134,   // single most common score
-  4:  0.129,
-  5:  0.108,
-  6:  0.083,
-  7:  0.062,
-  8:  0.044,
-  9:  0.029,
-  10: 0.018,
-  11: 0.011,
-  12: 0.006,
-  13: 0.004,   // 13+ is very rare (~0.4% of team-games)
-};
-
-// ── Win probability via Monte Carlo simulation ────────────────────────
-// Simulates remaining season for every team. Each missing run value is
-// modeled as a geometric random variable (games until first hit).
-// Winner = first team to collect all 14 values (0-13).
-const SIMULATIONS = 5000;
-const GAMES_LEFT  = 145; // roughly games remaining from mid-April
-
-function simulateWinProbabilities(scoresMap) {
-  const wins = {};
-  POOL_TEAMS.forEach(({ team }) => { wins[team] = 0; });
-
-  for (let sim = 0; sim < SIMULATIONS; sim++) {
-    const completionGame = {};
-
-    for (const { team } of POOL_TEAMS) {
-      const hit     = scoresMap[team] || new Set();
-      const missing = ALL_RUNS.filter(r => !hit.has(r));
-
-      if (missing.length === 0) {
-        completionGame[team] = 0; // already done
-        continue;
-      }
-
-      // Last missing value to land determines completion game.
-      // Each value is an independent geometric trial: P(hit on any game) = RUN_FREQ[r]
-      let maxGame = 0;
-      for (const r of missing) {
-        const p = RUN_FREQ[r] ?? 0.004;
-        const u = Math.random() || 1e-10; // avoid log(0)
-        const g = Math.ceil(Math.log(u) / Math.log(1 - p));
-        if (g > maxGame) maxGame = g;
-      }
-      completionGame[team] = maxGame;
-    }
-
-    // Winner = lowest completionGame within remaining games
-    let minG   = Infinity;
-    let winner = null;
-    for (const { team } of POOL_TEAMS) {
-      const g = completionGame[team];
-      if (g <= GAMES_LEFT && g < minG) { minG = g; winner = team; }
-    }
-    if (winner) wins[winner]++;
-  }
-
-  const probs = {};
-  POOL_TEAMS.forEach(({ team }) => {
-    probs[team] = Math.round((wins[team] / SIMULATIONS) * 1000) / 10;
-  });
-  return probs;
-}
-
 
 // ── Helpers ───────────────────────────────────────────────────────────
 function buildScoreMap(raw) {
@@ -320,18 +245,6 @@ export default function App() {
     return { team, owner, hit, missing, pct: Math.round((hit.size / 14) * 100), done: missing.length === 0 };
   }).sort((a, b) => b.hit.size - a.hit.size || a.missing.length - b.missing.length);
 
-  // Win probabilities — recomputed whenever scores change (5000 Monte Carlo sims)
-  const winProbs = useMemo(() => simulateWinProbabilities(scores), [scores]);
-
-  // Attach winProb into teamStats for sorting & display
-  // Re-sort: completed teams first (prob=100), then by winProb desc
-  teamStats.forEach(t => { t.winProb = winProbs[t.team] ?? 0; });
-  teamStats.sort((a, b) => {
-    if (a.done && !b.done) return -1;
-    if (!a.done && b.done) return 1;
-    return b.winProb - a.winProb || b.hit.size - a.hit.size;
-  });
-
   const winner      = teamStats.find(t => t.done);
   const liveList    = Object.entries(liveNow);
   const displayTeams = ownerFilter === "ALL" ? POOL_TEAMS : POOL_TEAMS.filter(t => t.owner === ownerFilter);
@@ -446,7 +359,6 @@ export default function App() {
                   {ALL_RUNS.map(r => <th key={r} style={css.th}>{r}</th>)}
                   <th style={css.th}>✓</th>
                   <th style={{ ...css.th, minWidth: 60 }}>Live</th>
-                  <th style={{ ...css.th, minWidth: 64 }}>Win%</th>
                 </tr>
               </thead>
               <tbody>
@@ -482,9 +394,6 @@ export default function App() {
                           ? <span style={css.liveScore}>{lg.score} <span style={{ color: "#64748b", fontSize: 10 }}>{lg.half?.slice(0,3)}{lg.inning}</span></span>
                           : <span style={{ color: "#1e293b" }}>—</span>}
                       </td>
-                      <td style={css.td}>
-                        <WinProbCell prob={winProbs[team]} />
-                      </td>
                     </tr>
                   );
                 })}
@@ -498,8 +407,7 @@ export default function App() {
       {tab === "leaderboard" && (
         <div style={css.body}>
           <p style={{ fontSize: 11, color: "#475569", marginBottom: 16 }}>
-            Each team must individually score all 14 run totals (0–13). First team to complete wins.
-            Win % is a Monte Carlo simulation (5,000 runs) based on historical MLB run frequency. Rare scores (0, 11, 12, 13) take far longer to hit than common ones (3, 4, 5).
+            Each team must individually score all 14 run totals (0–13). First team to complete all wins.
           </p>
           <div style={css.cardGrid}>
             {teamStats.map((t, idx) => {
@@ -520,7 +428,6 @@ export default function App() {
                     {lg && <span style={css.liveScore}>{lg.score}<span style={{ color: "#64748b", fontSize: 9 }}> {lg.half?.slice(0,3)}{lg.inning}</span></span>}
                     {isFlash && <span style={css.newTag}>NEW</span>}
                     <span style={{ fontSize: 15, fontWeight: 700, color: "#facc15" }}>{t.pct}%</span>
-                    <WinProbBadge prob={t.winProb} />
                   </div>
                   <div style={css.prog}><div style={{ ...css.progFill, width: `${t.pct}%`, background: t.done ? "#22c55e" : `hsl(${hue},60%,46%)` }} /></div>
                   <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginTop: 10 }}>
@@ -537,21 +444,7 @@ export default function App() {
                       );
                     })}
                   </div>
-                  {!t.done && (
-                    <div style={{ fontSize: 11, marginTop: 8 }}>
-                      <span style={{ color: "#64748b" }}>Need: </span>
-                      {t.missing.map((r, i) => {
-                        const eg = Math.round(1 / (RUN_FREQ[r] ?? 0.004));
-                        return (
-                          <span key={r} title={`~${eg} games avg to hit ${r} runs`}>
-                            <span style={{ color: "#f87171" }}>{r}</span>
-                            <span style={{ color: "#475569", fontSize: 10 }}>({eg}g)</span>
-                            {i < t.missing.length - 1 ? " " : ""}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  )}
+                  {!t.done && <div style={{ color: "#f87171", fontSize: 11, marginTop: 8 }}>Need: {t.missing.join(", ")}</div>}
                   {t.done  && <div style={{ color: "#22c55e", fontSize: 12, fontWeight: 700, marginTop: 8 }}>🏆 COMPLETE!</div>}
                 </div>
               );
@@ -630,68 +523,6 @@ export default function App() {
         body { margin: 0; }
       `}</style>
     </div>
-  );
-}
-
-
-// ── Win probability display components ───────────────────────────────
-
-// Color: red (<5%) → amber → yellow → green (>20%)
-function probColor(p) {
-  if (p <= 0)  return "#334155";
-  if (p < 2)   return "#7f1d1d";
-  if (p < 5)   return "#92400e";
-  if (p < 10)  return "#713f12";
-  if (p < 20)  return "#854d0e";
-  if (p < 35)  return "#365314";
-  return "#14532d";
-}
-function probText(p) {
-  if (p <= 0)  return "#475569";
-  if (p < 5)   return "#fca5a5";
-  if (p < 10)  return "#fcd34d";
-  if (p < 20)  return "#fde68a";
-  return "#86efac";
-}
-
-// Small cell for the grid table
-function WinProbCell({ prob }) {
-  if (prob === undefined) return <span style={{ color: "#334155" }}>—</span>;
-  return (
-    <span style={{
-      display: "inline-block",
-      background: probColor(prob),
-      color: probText(prob),
-      padding: "2px 6px",
-      borderRadius: 4,
-      fontSize: 11,
-      fontWeight: 700,
-      minWidth: 38,
-      textAlign: "center",
-    }}>
-      {prob === 0 ? "<0.1%" : `${prob}%`}
-    </span>
-  );
-}
-
-// Larger badge for leaderboard cards
-function WinProbBadge({ prob }) {
-  if (prob === undefined) return null;
-  return (
-    <span style={{
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 3,
-      background: probColor(prob),
-      color: probText(prob),
-      padding: "3px 8px",
-      borderRadius: 5,
-      fontSize: 12,
-      fontWeight: 700,
-      border: `1px solid ${probText(prob)}33`,
-    }}>
-      🎯 {prob === 0 ? "<0.1%" : `${prob}%`}
-    </span>
   );
 }
 
