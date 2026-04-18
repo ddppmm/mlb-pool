@@ -1,6 +1,5 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
-// ── Pool roster ───────────────────────────────────────────────────────
 const POOL_TEAMS = [
   { team: "Angels",       owner: "JARED-WED"   },
   { team: "Astros",       owner: "BORG"         },
@@ -34,7 +33,6 @@ const POOL_TEAMS = [
   { team: "Yankees",      owner: "MURPH/RICK"  },
 ];
 
-// Pre-seeded from the April 17 sheet
 const INITIAL_SCORES = {
   Angels: [7], Astros: [4], "Blue Jays": [3], Braves: [9],
   Brewers: [7], Cardinals: [9], Cubs: [11], Diamondbacks: [6],
@@ -46,8 +44,8 @@ const INITIAL_SCORES = {
   "White Sox": [9], Yankees: [4],
 };
 
-const ALL_RUNS = Array.from({ length: 14 }, (_, i) => i); // 0–13
-const POLL_MS  = 60_000; // 60 seconds
+const ALL_RUNS  = Array.from({ length: 14 }, (_, i) => i);
+const POLL_MS   = 60_000;
 
 const TEAM_COLORS = {
   Angels: "#BA0021", Astros: "#EB6E1F", "Blue Jays": "#134A8E",
@@ -55,37 +53,83 @@ const TEAM_COLORS = {
   Cubs: "#0E3386", Diamondbacks: "#A71930", Dodgers: "#005A9C",
   Giants: "#FD5A1E", Guardians: "#00385D", Mariners: "#0C2C56",
   Marlins: "#00A3E0", Mets: "#002D72", Nationals: "#AB0003",
-  Athletics: "#003831", Orioles: "#DF4601", Padres: "#2F241D",
+  Athletics: "#003831", Orioles: "#DF4601", Padres: "#7B3F00",
   Phillies: "#E81828", Pirates: "#27251F", Rangers: "#003278",
   "Red Sox": "#BD3039", Reds: "#C6011F", Rockies: "#33006F",
   Royals: "#004687", Rays: "#092C5C", Tigers: "#0C2340",
-  Twins: "#002B5C", "White Sox": "#27251F", Yankees: "#003087",
+  Twins: "#002B5C", "White Sox": "#555555", Yankees: "#003087",
 };
 
+// ── Run frequency: empirical prob of scoring exactly N runs in a game ──
+// Source: Fangraphs/Retrosheet historical data, ~4.5 R/G era (2000-2024)
+// Most common: 3 runs (13.4%), then 4 (12.9%), then 2 (12.1%)
+// Rarest in pool: 13 (~0.4%) → expect ~250 games to hit it
+const RUN_FREQ = {
+  0: 0.073, 1: 0.103, 2: 0.122, 3: 0.134, 4: 0.129,
+  5: 0.108, 6: 0.083, 7: 0.062, 8: 0.044, 9: 0.029,
+  10: 0.018, 11: 0.011, 12: 0.006, 13: 0.004,
+};
+
+const EXP_GAMES = {}; // expected games to first hit each run value
+ALL_RUNS.forEach(r => { EXP_GAMES[r] = Math.round(1 / RUN_FREQ[r]); });
+
+// ── Monte Carlo win probability ───────────────────────────────────────
+const SIMS       = 5000;
+const GAMES_LEFT = 145;
+
+function simulateWinProbs(scoresMap) {
+  const wins = {};
+  POOL_TEAMS.forEach(({ team }) => { wins[team] = 0; });
+
+  for (let s = 0; s < SIMS; s++) {
+    const finishOn = {};
+    for (const { team } of POOL_TEAMS) {
+      const hit     = scoresMap[team] || new Set();
+      const missing = ALL_RUNS.filter(r => !hit.has(r));
+      if (missing.length === 0) { finishOn[team] = 0; continue; }
+      let last = 0;
+      for (const r of missing) {
+        const p = RUN_FREQ[r];
+        const u = Math.random() || 1e-10;
+        const g = Math.ceil(Math.log(u) / Math.log(1 - p));
+        if (g > last) last = g;
+      }
+      finishOn[team] = last;
+    }
+    let best = Infinity, winner = null;
+    for (const { team } of POOL_TEAMS) {
+      const g = finishOn[team];
+      if (g <= GAMES_LEFT && g < best) { best = g; winner = team; }
+    }
+    if (winner) wins[winner]++;
+  }
+
+  const out = {};
+  POOL_TEAMS.forEach(({ team }) => {
+    out[team] = Math.round((wins[team] / SIMS) * 1000) / 10;
+  });
+  return out;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────
 const allOwners = [...new Set(POOL_TEAMS.map(t => t.owner))].sort();
 const ownerHues = {};
 allOwners.forEach((o, i) => { ownerHues[o] = Math.round((i / allOwners.length) * 360); });
 
-// ── Helpers ───────────────────────────────────────────────────────────
-function buildScoreMap(raw) {
+function buildMap(raw) {
   const m = {};
   POOL_TEAMS.forEach(({ team }) => { m[team] = new Set(raw[team] || []); });
   return m;
 }
 
-// Match MLB Stats API team name → our internal short name
-function resolveTeam(apiName) {
-  if (!apiName) return null;
-  const lower = apiName.toLowerCase().trim();
-  return POOL_TEAMS.find(t =>
-    lower.includes(t.team.toLowerCase()) ||
-    t.team.toLowerCase().includes(lower)
-  )?.team ?? null;
+function resolveTeam(name) {
+  if (!name) return null;
+  const l = name.toLowerCase();
+  return POOL_TEAMS.find(t => l.includes(t.team.toLowerCase()) || t.team.toLowerCase().includes(l))?.team ?? null;
 }
 
 function isGameHours() {
-  const et = new Date().toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", hour12: false });
-  const h = parseInt(et, 10);
+  const h = parseInt(new Date().toLocaleString("en-US", { timeZone: "America/New_York", hour: "numeric", hour12: false }), 10);
   return h >= 12 || h <= 1;
 }
 
@@ -93,112 +137,103 @@ function etToday() {
   return new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
 }
 
-// ── THE KEY CHANGE: fetch via our Vercel proxy instead of MLB directly ──
-async function fetchMLB(dateStr) {
-  const url = `/api/scores?date=${dateStr}`;
-  const res = await fetch(url);
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(body.error ?? `Proxy returned ${res.status}`);
-  }
+async function fetchMLB(date) {
+  // In artifact: try the MLB API directly (will likely fail due to sandbox restrictions)
+  // In Vercel deployment: change this to `/api/scores?date=${date}`
+  const res = await fetch(`/api/scores?date=${date}`);
+  if (!res.ok) { const b = await res.json().catch(()=>({})); throw new Error(b.error ?? `Proxy ${res.status}`); }
   const data = await res.json();
-
-  // Proxy already separated finals/live with raw MLB names — resolve to our names
-  const finals = {};
-  const live   = {};
+  // Proxy returns {finals, live, totalGames} with raw MLB team names - resolve to our names
+  const finals = {}, live = {};
   Object.entries(data.finals ?? {}).forEach(([name, score]) => {
-    const team = resolveTeam(name);
-    if (team) finals[team] = score;
+    const team = resolveTeam(name); if (team) finals[team] = score;
   });
   Object.entries(data.live ?? {}).forEach(([name, info]) => {
-    const team = resolveTeam(name);
-    if (team) live[team] = info;
+    const team = resolveTeam(name); if (team) live[team] = info;
   });
-
   return { finals, live, totalGames: data.totalGames ?? 0 };
+}
+
+// ── Win prob display helpers ──────────────────────────────────────────
+function probBg(p)   { return p <= 0 ? "#1e293b" : p < 3 ? "#2d1515" : p < 8 ? "#2d1f0a" : p < 15 ? "#1a2d0a" : "#0d2d12"; }
+function probFg(p)   { return p <= 0 ? "#334155" : p < 3 ? "#fca5a5" : p < 8 ? "#fcd34d" : p < 15 ? "#bef264" : "#86efac"; }
+function probLabel(p){ return p <= 0 ? "<0.1%" : `${p}%`; }
+
+function WinBadge({ prob, large }) {
+  const bg = probBg(prob), fg = probFg(prob);
+  return (
+    <span style={{
+      display: "inline-block", background: bg, color: fg,
+      padding: large ? "3px 9px" : "2px 6px",
+      borderRadius: 4, fontSize: large ? 12 : 11,
+      fontWeight: 700, whiteSpace: "nowrap",
+      border: `1px solid ${fg}22`,
+      minWidth: large ? 52 : 44, textAlign: "center",
+    }}>
+      {large ? "🎯 " : ""}{probLabel(prob)}
+    </span>
+  );
 }
 
 // ── App ───────────────────────────────────────────────────────────────
 export default function App() {
-  const [scores,     setScores]     = useState(() => buildScoreMap(INITIAL_SCORES));
-  const [liveNow,    setLiveNow]    = useState({});
-  const [tab,        setTab]        = useState("grid");
-  const [ownerFilter,setFilter]     = useState("ALL");
-  const [manualTeam, setMTeam]      = useState(POOL_TEAMS[0].team);
-  const [manualRun,  setMRun]       = useState("");
-  const [toast,      setToast]      = useState(null);
-  const [autoOn,     setAutoOn]     = useState(true);
-  const [fetching,   setFetching]   = useState(false);
-  const [lastFetch,  setLastFetch]  = useState(null);
-  const [pollErr,    setPollErr]    = useState(null);
-  const [countdown,  setCountdown]  = useState(null);
-  const [flashTeams, setFlash]      = useState(new Set());
+  const [scores,    setScores]    = useState(() => buildMap(INITIAL_SCORES));
+  const [liveNow,   setLiveNow]   = useState({});
+  const [tab,       setTab]       = useState("leaderboard");
+  const [filter,    setFilter]    = useState("ALL");
+  const [mTeam,     setMTeam]     = useState(POOL_TEAMS[0].team);
+  const [mRun,      setMRun]      = useState("");
+  const [toast,     setToast]     = useState(null);
+  const [autoOn,    setAutoOn]    = useState(true);
+  const [fetching,  setFetching]  = useState(false);
+  const [lastFetch, setLastFetch] = useState(null);
+  const [pollErr,   setPollErr]   = useState(null);
+  const [countdown, setCountdown] = useState(null);
+  const [flash,     setFlash]     = useState(new Set());
 
   const timerRef = useRef(null);
   const cdRef    = useRef(null);
   const nextAt   = useRef(null);
 
-  const toast$ = useCallback((msg, type = "ok") => {
+  const showToast = useCallback((msg, type = "ok") => {
     setToast({ msg, type });
-    setTimeout(() => setToast(null), 4500);
+    setTimeout(() => setToast(null), 4000);
   }, []);
 
-  // ── Fetch & merge ─────────────────────────────────────────────────
   const doFetch = useCallback(async (silent = false) => {
-    setFetching(true);
-    setPollErr(null);
+    setFetching(true); setPollErr(null);
     try {
       const { finals, live, totalGames } = await fetchMLB(etToday());
       setLiveNow(live);
-
-      const newlyHit = [];
+      const newHits = [];
       setScores(prev => {
         const next = {};
         POOL_TEAMS.forEach(({ team }) => { next[team] = new Set(prev[team]); });
         Object.entries(finals).forEach(([team, score]) => {
-          if (next[team] && !next[team].has(score)) {
-            next[team].add(score);
-            newlyHit.push({ team, score });
-          }
+          if (next[team] && !next[team].has(score)) { next[team].add(score); newHits.push({ team, score }); }
         });
         return next;
       });
-
       setLastFetch(new Date());
-
-      if (newlyHit.length > 0) {
-        const names = new Set(newlyHit.map(h => h.team));
-        setFlash(names);
-        setTimeout(() => setFlash(new Set()), 6000);
-        toast$(`🆕 ${newlyHit.map(h => `${h.team} → ${h.score}`).join(" · ")}`, "ok");
+      if (newHits.length > 0) {
+        setFlash(new Set(newHits.map(h => h.team)));
+        setTimeout(() => setFlash(new Set()), 5000);
+        showToast(`🆕 ${newHits.map(h => `${h.team} → ${h.score}`).join(" · ")}`, "ok");
       } else if (!silent) {
-        const lc = Object.keys(live).length;
-        const fc = Object.keys(finals).length;
-        toast$(
-          totalGames === 0 ? "No games scheduled today" :
-          `${fc} final${fc !== 1 ? "s" : ""} · ${lc} live · no new pool scores`,
-          "info"
-        );
+        const lc = Object.keys(live).length, fc = Object.keys(finals).length;
+        showToast(totalGames === 0 ? "No games today" : `${fc} finals · ${lc} live · no new scores`, "info");
       }
     } catch (e) {
       setPollErr(e.message);
-      if (!silent) toast$(`⚠ ${e.message}`, "err");
-    } finally {
-      setFetching(false);
-    }
-  }, [toast$]);
+      if (!silent) showToast(`⚠ ${e.message} — use Manual Entry to add scores`, "err");
+    } finally { setFetching(false); }
+  }, [showToast]);
 
-  // ── Scheduler ────────────────────────────────────────────────────
   const schedule = useCallback(() => {
-    clearTimeout(timerRef.current);
-    clearInterval(cdRef.current);
+    clearTimeout(timerRef.current); clearInterval(cdRef.current);
     nextAt.current = Date.now() + POLL_MS;
     setCountdown(Math.round(POLL_MS / 1000));
-
-    cdRef.current = setInterval(() => {
-      setCountdown(Math.max(0, Math.round((nextAt.current - Date.now()) / 1000)));
-    }, 1000);
-
+    cdRef.current  = setInterval(() => setCountdown(Math.max(0, Math.round((nextAt.current - Date.now()) / 1000))), 1000);
     timerRef.current = setTimeout(async () => {
       clearInterval(cdRef.current);
       if (isGameHours()) await doFetch(true);
@@ -207,192 +242,236 @@ export default function App() {
   }, [doFetch]);
 
   useEffect(() => {
-    doFetch(true);
-    schedule();
+    doFetch(true); schedule();
     return () => { clearTimeout(timerRef.current); clearInterval(cdRef.current); };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []); // eslint-disable-line
 
   const toggleAuto = () => {
-    if (autoOn) {
-      clearTimeout(timerRef.current); clearInterval(cdRef.current);
-      setCountdown(null); setAutoOn(false);
-    } else {
-      setAutoOn(true); schedule();
-    }
+    if (autoOn) { clearTimeout(timerRef.current); clearInterval(cdRef.current); setCountdown(null); setAutoOn(false); }
+    else { setAutoOn(true); schedule(); }
   };
 
-  const syncNow = () => { doFetch(false); if (autoOn) schedule(); };
-
   const addManual = () => {
-    const s = parseInt(manualRun);
-    if (isNaN(s) || s < 0 || s > 13) { toast$("Must be 0–13", "err"); return; }
-    setScores(prev => ({ ...prev, [manualTeam]: new Set([...prev[manualTeam], s]) }));
-    toast$(`✓ ${manualTeam} +${s}`);
-    setMRun("");
+    const s = parseInt(mRun);
+    if (isNaN(s) || s < 0 || s > 13) { showToast("Must be 0–13", "err"); return; }
+    setScores(prev => ({ ...prev, [mTeam]: new Set([...prev[mTeam], s]) }));
+    showToast(`✓ ${mTeam} scored ${s}`); setMRun("");
   };
 
   const removeScore = (team, run) =>
     setScores(prev => { const n = new Set(prev[team]); n.delete(run); return { ...prev, [team]: n }; });
 
-  // ── Derived ──────────────────────────────────────────────────────
-  const runCoverage = ALL_RUNS.map(r => ({
-    run: r, teams: POOL_TEAMS.filter(({ team }) => scores[team]?.has(r)),
-  }));
+  // ── Derived ───────────────────────────────────────────────────────
+  const winProbs = useMemo(() => simulateWinProbs(scores), [scores]);
 
-  const teamStats = POOL_TEAMS.map(({ team, owner }) => {
-    const hit     = scores[team] || new Set();
-    const missing = ALL_RUNS.filter(r => !hit.has(r));
-    return { team, owner, hit, missing, pct: Math.round((hit.size / 14) * 100), done: missing.length === 0 };
-  }).sort((a, b) => b.hit.size - a.hit.size || a.missing.length - b.missing.length);
+  const teamStats = useMemo(() => {
+    return POOL_TEAMS.map(({ team, owner }) => {
+      const hit     = scores[team] || new Set();
+      const missing = ALL_RUNS.filter(r => !hit.has(r));
+      return {
+        team, owner, hit, missing,
+        pct:     Math.round((hit.size / 14) * 100),
+        done:    missing.length === 0,
+        winProb: winProbs[team] ?? 0,
+      };
+    }).sort((a, b) => {
+      if (a.done !== b.done) return a.done ? -1 : 1;
+      return b.winProb - a.winProb || b.hit.size - a.hit.size;
+    });
+  }, [scores, winProbs]);
 
-  const winner      = teamStats.find(t => t.done);
-  const liveList    = Object.entries(liveNow);
-  const displayTeams = ownerFilter === "ALL" ? POOL_TEAMS : POOL_TEAMS.filter(t => t.owner === ownerFilter);
-  const fmtTime     = d => d?.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" }) ?? "—";
-  const pct         = (POLL_MS / 1000 - (countdown ?? 0)) / (POLL_MS / 1000) * 100;
+  const runCoverage  = ALL_RUNS.map(r => ({ run: r, teams: POOL_TEAMS.filter(({ team }) => scores[team]?.has(r)) }));
+  const winner       = teamStats.find(t => t.done);
+  const liveList     = Object.entries(liveNow);
+  const displayTeams = filter === "ALL" ? POOL_TEAMS : POOL_TEAMS.filter(t => t.owner === filter);
+  const cdPct        = (POLL_MS / 1000 - (countdown ?? 0)) / (POLL_MS / 1000) * 100;
+  const fmtTime      = d => d?.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", second: "2-digit" }) ?? "—";
+  const totalWinProb = Object.values(winProbs).reduce((a, b) => a + b, 0);
 
-  // ── Render ────────────────────────────────────────────────────────
   return (
-    <div style={css.wrap}>
+    <div style={S.wrap}>
 
       {/* HEADER */}
-      <header style={css.hdr}>
-        <div style={css.hdrL}>
-          <span style={{ fontSize: 30 }}>⚾</span>
+      <header style={S.hdr}>
+        <div style={S.hdrL}>
+          <span style={{ fontSize: 28 }}>⚾</span>
           <div>
-            <div style={css.ttl}>13-Run Pool</div>
-            <div style={css.sub}>MLB 2026 · Started April 17</div>
+            <div style={S.ttl}>13-Run Pool</div>
+            <div style={S.sub}>MLB 2026 · Started April 17</div>
           </div>
         </div>
-        <div style={css.hdrR}>
-          {winner && <div style={css.winBadge}>🏆 {winner.owner} wins with {winner.team}!</div>}
-          {liveList.length > 0 && (
-            <div style={css.liveBadge}>
-              <span style={css.liveDot} />
-              {liveList.length} LIVE
-            </div>
-          )}
+        <div style={S.hdrR}>
+          {winner && <div style={S.winBanner}>🏆 {winner.owner} · {winner.team}</div>}
+          {liveList.length > 0 && <div style={S.livePill}><span style={S.liveDot}/>LIVE {liveList.length}</div>}
         </div>
       </header>
 
-      {/* POLL CONTROLS */}
-      <div style={css.pollBar}>
-        <div style={css.pollL}>
-          <button style={{ ...css.autoBtn, ...(autoOn ? css.autoBtnOn : {}) }} onClick={toggleAuto}>
-            {autoOn ? "⏸ Auto ON" : "▶ Auto OFF"}
+      {/* POLL BAR */}
+      <div style={S.pollBar}>
+        <div style={S.pollL}>
+          <button style={{ ...S.autoBtn, ...(autoOn ? S.autoBtnOn : {}) }} onClick={toggleAuto}>
+            {autoOn ? "⏸ Auto" : "▶ Auto"}
           </button>
-          <button style={css.syncBtn} onClick={syncNow} disabled={fetching}>
-            <span style={fetching ? css.spin : {}}>{fetching ? "⟳" : "⟳"}</span>
-            {fetching ? " Fetching…" : " Sync Now"}
+          <button style={S.syncBtn} onClick={() => { doFetch(false); if (autoOn) schedule(); }} disabled={fetching}>
+            <span style={fetching ? S.spin : {}}>{fetching ? "⟳" : "⟳"}</span>{fetching ? " …" : " Sync"}
           </button>
           {autoOn && countdown !== null && (
-            <div style={css.cdWrap}>
-              <span style={css.cdLabel}>Next: <strong style={{ color: "#60a5fa" }}>{countdown}s</strong></span>
-              <div style={css.cdTrack}><div style={{ ...css.cdFill, width: `${pct}%` }} /></div>
+            <div style={S.cdWrap}>
+              <span style={{ color: "#475569", fontSize: 11 }}>Next: <b style={{ color: "#60a5fa" }}>{countdown}s</b></span>
+              <div style={S.cdTrack}><div style={{ ...S.cdFill, width: `${cdPct}%` }} /></div>
             </div>
           )}
-          {!isGameHours() && autoOn && (
-            <span style={css.sleepNote}>💤 Outside game hours — polling paused</span>
-          )}
         </div>
-        <div style={css.pollR}>
-          {pollErr && <span style={{ color: "#f87171", fontSize: 11 }}>⚠ {pollErr}</span>}
-          {lastFetch && <span style={{ color: "#334155", fontSize: 11 }}>Updated {fmtTime(lastFetch)}</span>}
+        <div style={S.pollR}>
+          {pollErr && <span style={{ color: "#f87171", fontSize: 10 }}>⚠ {pollErr}</span>}
+          {lastFetch && <span style={{ color: "#334155", fontSize: 10 }}>↻ {fmtTime(lastFetch)}</span>}
         </div>
       </div>
 
       {/* LIVE TICKER */}
       {liveList.length > 0 && (
-        <div style={css.ticker}>
-          <span style={css.tickHd}>LIVE</span>
+        <div style={S.ticker}>
+          <span style={S.tickLbl}>LIVE</span>
           {liveList.map(([team, g]) => (
-            <span key={team} style={css.tickItem}>
-              <span style={{ ...css.dot, background: TEAM_COLORS[team] || "#888" }} />
-              <b>{team}</b>&nbsp;{g.score}
+            <span key={team} style={S.tickItem}>
+              <span style={{ ...S.dot, background: TEAM_COLORS[team] || "#888" }} />
+              <b>{team}</b> {g.score}
               <span style={{ color: "#64748b", fontSize: 10 }}> {g.half?.slice(0,3)}{g.inning}</span>
             </span>
           ))}
         </div>
       )}
 
-      {/* COVERAGE BAR */}
-      <div style={css.covBar}>
-        {ALL_RUNS.map(r => {
-          const ok = runCoverage[r].teams.length > 0;
-          return (
-            <div key={r}
-              style={{ ...css.covPill, background: ok ? "#166534" : "#1e293b", border: `1px solid ${ok ? "#22c55e" : "#334155"}` }}
-              title={ok ? runCoverage[r].teams.map(t => `${t.team} (${t.owner})`).join(", ") : "Not yet hit"}>
-              <span style={{ fontSize: 11, fontWeight: 700 }}>{r}</span>
-              {ok && <span style={{ fontSize: 8, color: "#86efac" }}>✓</span>}
-            </div>
-          );
-        })}
-        <span style={{ marginLeft: "auto", fontSize: 11, color: "#475569" }}>
-          {runCoverage.filter(r => r.teams.length > 0).length}/14 covered
-        </span>
-      </div>
-
       {/* TABS */}
-      <div style={css.tabRow}>
-        {[["grid","📊 Grid"],["leaderboard","🏅 Leaderboard"],["manual","✏️ Manual"]].map(([id, lbl]) => (
-          <button key={id} style={{ ...css.tabBtn, ...(tab === id ? css.tabOn : {}) }} onClick={() => setTab(id)}>{lbl}</button>
+      <div style={S.tabRow}>
+        {[["leaderboard","🏅 Leaderboard"],["grid","📊 Grid"],["manual","✏️ Manual"]].map(([id, lbl]) => (
+          <button key={id} style={{ ...S.tabBtn, ...(tab === id ? S.tabOn : {}) }} onClick={() => setTab(id)}>{lbl}</button>
         ))}
       </div>
 
-      {/* ═══ GRID ═══ */}
+      {/* ══ LEADERBOARD ══ */}
+      {tab === "leaderboard" && (
+        <div style={S.body}>
+          <div style={S.modelNote}>
+            📊 <strong>Win %</strong> is a Monte Carlo simulation ({SIMS.toLocaleString()} runs) based on historical MLB run frequencies. Scores of 3–5 runs are most common (~13% each). Scores of 0, 11, 12, and 13 are rare — teams missing those face a steep uphill climb.
+          </div>
+          <div style={S.cardGrid}>
+            {teamStats.map((t, idx) => {
+              const hue     = ownerHues[t.owner];
+              const lg      = liveNow[t.team];
+              const isFlash = flash.has(t.team);
+              return (
+                <div key={t.team} style={{
+                  ...S.card,
+                  borderLeftColor: t.done ? "#22c55e" : `hsl(${hue},55%,40%)`,
+                  background: isFlash ? "#0a2010" : "#0b1828",
+                }}>
+                  {/* Card header */}
+                  <div style={S.cardHdr}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#1e293b", minWidth: 24 }}>#{idx+1}</span>
+                    <span style={{ ...S.dot, background: TEAM_COLORS[t.team] || "#555", width: 10, height: 10 }} />
+                    <span style={{ fontSize: 13, fontWeight: 700, color: "#f1f5f9", flex: 1 }}>{t.team}</span>
+                    <span style={{ ...S.ownerTag, background: `hsl(${hue},45%,22%)`, border: `1px solid hsl(${hue},45%,35%)`, fontSize: 10 }}>{t.owner}</span>
+                    {lg && <span style={S.liveScore}>{lg.score}<span style={{ fontSize: 9, color: "#64748b" }}> {lg.half?.slice(0,3)}{lg.inning}</span></span>}
+                    {isFlash && <span style={S.newTag}>NEW</span>}
+                  </div>
+
+                  {/* Win prob + progress */}
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                    <WinBadge prob={t.winProb} large />
+                    <div style={{ flex: 1 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 3 }}>
+                        <span style={{ fontSize: 10, color: "#475569" }}>{t.hit.size}/14 scores</span>
+                        <span style={{ fontSize: 10, color: "#facc15", fontWeight: 700 }}>{t.pct}%</span>
+                      </div>
+                      <div style={S.prog}>
+                        <div style={{ ...S.progFill, width: `${t.pct}%`, background: t.done ? "#22c55e" : `hsl(${hue},60%,44%)` }} />
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Run pills */}
+                  <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginBottom: 6 }}>
+                    {ALL_RUNS.map(r => {
+                      const isHit  = t.hit.has(r);
+                      const isLive = lg && lg.score === r && !isHit;
+                      return (
+                        <span key={r} title={isHit ? `✓ scored ${r}` : `~${EXP_GAMES[r]}g avg`} style={{
+                          width: 20, height: 20, borderRadius: 3, fontSize: 9, fontWeight: 700,
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          background: isHit ? `hsl(${hue},55%,32%)` : isLive ? "#451a03" : "#131f30",
+                          color:      isHit ? "#fff" : isLive ? "#fde68a" : "#2d3f55",
+                          border:     isLive ? "1px solid #f59e0b" : "none",
+                        }}>{r}</span>
+                      );
+                    })}
+                  </div>
+
+                  {t.done && <div style={{ color: "#22c55e", fontSize: 11, fontWeight: 700 }}>🏆 ALL 14 COMPLETE!</div>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ══ GRID ══ */}
       {tab === "grid" && (
-        <div style={css.body}>
-          <div style={css.filterRow}>
-            <span style={{ fontSize: 11, color: "#475569" }}>Owner:</span>
+        <div style={S.body}>
+          <div style={S.filterRow}>
+            <span style={{ fontSize: 10, color: "#475569" }}>Owner:</span>
             {["ALL", ...allOwners].map(o => (
-              <button key={o} style={{ ...css.chip, ...(ownerFilter === o ? css.chipOn : {}) }}
-                onClick={() => setFilter(o)}>{o}</button>
+              <button key={o} style={{ ...S.chip, ...(filter === o ? S.chipOn : {}) }} onClick={() => setFilter(o)}>{o}</button>
             ))}
           </div>
-          <div style={css.tblWrap}>
-            <table style={css.tbl}>
+          <div style={S.tblWrap}>
+            <table style={S.tbl}>
               <thead>
                 <tr>
-                  <th style={{ ...css.th, textAlign: "left", minWidth: 115 }}>Team</th>
-                  <th style={{ ...css.th, textAlign: "left", minWidth: 100 }}>Owner</th>
-                  {ALL_RUNS.map(r => <th key={r} style={css.th}>{r}</th>)}
-                  <th style={css.th}>✓</th>
-                  <th style={{ ...css.th, minWidth: 60 }}>Live</th>
+                  <th style={{ ...S.th, textAlign: "left", minWidth: 105 }}>Team</th>
+                  <th style={{ ...S.th, textAlign: "left", minWidth: 95 }}>Owner</th>
+                  {ALL_RUNS.map(r => (
+                    <th key={r} style={{ ...S.th, fontSize: 10 }} title={`Avg ${EXP_GAMES[r]} games to hit`}>{r}</th>
+                  ))}
+                  <th style={S.th}>✓</th>
+                  <th style={{ ...S.th, minWidth: 52 }}>Win%</th>
+                  <th style={{ ...S.th, minWidth: 55 }}>Live</th>
                 </tr>
               </thead>
               <tbody>
                 {displayTeams.map(({ team, owner }) => {
-                  const hit      = scores[team] || new Set();
-                  const hue      = ownerHues[owner];
-                  const lg       = liveNow[team];
-                  const isFlash  = flashTeams.has(team);
+                  const hit  = scores[team] || new Set();
+                  const hue  = ownerHues[owner];
+                  const lg   = liveNow[team];
+                  const wp   = winProbs[team] ?? 0;
+                  const isF  = flash.has(team);
                   return (
-                    <tr key={team} style={{ ...css.tr, background: isFlash ? "rgba(34,197,94,0.07)" : "transparent" }}>
-                      <td style={{ ...css.td, textAlign: "left" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                          <span style={{ ...css.dot, background: TEAM_COLORS[team] || "#555" }} />
-                          <span style={{ whiteSpace: "nowrap" }}>{team}</span>
-                          {isFlash && <span style={css.newTag}>NEW</span>}
+                    <tr key={team} style={{ ...S.tr, background: isF ? "rgba(34,197,94,0.06)" : "transparent" }}>
+                      <td style={{ ...S.td, textAlign: "left" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                          <span style={{ ...S.dot, background: TEAM_COLORS[team] || "#555" }} />
+                          <span style={{ fontSize: 11, whiteSpace: "nowrap" }}>{team}</span>
+                          {isF && <span style={S.newTag}>NEW</span>}
                         </div>
                       </td>
-                      <td style={{ ...css.td, textAlign: "left" }}>
-                        <span style={{ ...css.ownerTag, background: `hsl(${hue},48%,24%)`, border: `1px solid hsl(${hue},48%,38%)` }}>{owner}</span>
+                      <td style={{ ...S.td, textAlign: "left" }}>
+                        <span style={{ ...S.ownerTag, background: `hsl(${hue},45%,22%)`, border: `1px solid hsl(${hue},45%,35%)` }}>{owner}</span>
                       </td>
                       {ALL_RUNS.map(r => (
-                        <td key={r} style={css.td}>
+                        <td key={r} style={S.td}>
                           {hit.has(r)
-                            ? <span style={css.chk}>✓</span>
+                            ? <span style={{ color: "#22c55e", fontWeight: 700, fontSize: 12 }}>✓</span>
                             : lg?.score === r
-                              ? <span style={css.liveCell}>●</span>
-                              : <span style={css.dot2}>·</span>}
+                              ? <span style={{ color: "#f59e0b", fontSize: 10 }}>●</span>
+                              : <span style={{ color: "#1a2535" }}>·</span>}
                         </td>
                       ))}
-                      <td style={{ ...css.td, fontWeight: 700, color: "#facc15" }}>{hit.size}</td>
-                      <td style={css.td}>
+                      <td style={{ ...S.td, fontWeight: 700, color: "#facc15", fontSize: 11 }}>{hit.size}</td>
+                      <td style={S.td}><WinBadge prob={wp} /></td>
+                      <td style={S.td}>
                         {lg
-                          ? <span style={css.liveScore}>{lg.score} <span style={{ color: "#64748b", fontSize: 10 }}>{lg.half?.slice(0,3)}{lg.inning}</span></span>
-                          : <span style={{ color: "#1e293b" }}>—</span>}
+                          ? <span style={{ color: "#fbbf24", fontSize: 10, fontWeight: 700 }}>{lg.score} <span style={{ color: "#475569" }}>{lg.half?.slice(0,3)}{lg.inning}</span></span>
+                          : <span style={{ color: "#1a2535" }}>—</span>}
                       </td>
                     </tr>
                   );
@@ -403,96 +482,49 @@ export default function App() {
         </div>
       )}
 
-      {/* ═══ LEADERBOARD ═══ */}
-      {tab === "leaderboard" && (
-        <div style={css.body}>
-          <p style={{ fontSize: 11, color: "#475569", marginBottom: 16 }}>
-            Each team must individually score all 14 run totals (0–13). First team to complete all wins.
-          </p>
-          <div style={css.cardGrid}>
-            {teamStats.map((t, idx) => {
-              const hue     = ownerHues[t.owner];
-              const lg      = liveNow[t.team];
-              const isFlash = flashTeams.has(t.team);
-              return (
-                <div key={t.team} style={{
-                  ...css.card,
-                  borderLeftColor: t.done ? "#22c55e" : `hsl(${hue},55%,42%)`,
-                  background: isFlash ? "rgba(34,197,94,0.05)" : "#0c1525",
-                }}>
-                  <div style={css.cardHdr}>
-                    <span style={css.rankN}>#{idx + 1}</span>
-                    <span style={{ ...css.dot, background: TEAM_COLORS[t.team] || "#555", width: 11, height: 11 }} />
-                    <span style={{ fontSize: 14, fontWeight: 700, color: "#f1f5f9", flex: 1 }}>{t.team}</span>
-                    <span style={{ ...css.ownerTag, background: `hsl(${hue},48%,24%)`, border: `1px solid hsl(${hue},48%,38%)`, fontSize: 10 }}>{t.owner}</span>
-                    {lg && <span style={css.liveScore}>{lg.score}<span style={{ color: "#64748b", fontSize: 9 }}> {lg.half?.slice(0,3)}{lg.inning}</span></span>}
-                    {isFlash && <span style={css.newTag}>NEW</span>}
-                    <span style={{ fontSize: 15, fontWeight: 700, color: "#facc15" }}>{t.pct}%</span>
-                  </div>
-                  <div style={css.prog}><div style={{ ...css.progFill, width: `${t.pct}%`, background: t.done ? "#22c55e" : `hsl(${hue},60%,46%)` }} /></div>
-                  <div style={{ display: "flex", gap: 3, flexWrap: "wrap", marginTop: 10 }}>
-                    {ALL_RUNS.map(r => {
-                      const isHit  = t.hit.has(r);
-                      const isLive = lg && lg.score === r && !isHit;
-                      return (
-                        <span key={r} style={{
-                          ...css.mpill,
-                          background: isHit ? `hsl(${hue},55%,34%)` : isLive ? "#451a03" : "#1a2235",
-                          color:      isHit ? "#fff" : isLive ? "#fde68a" : "#334155",
-                          border:     isLive ? "1px solid #f59e0b" : "1px solid transparent",
-                        }}>{r}</span>
-                      );
-                    })}
-                  </div>
-                  {!t.done && <div style={{ color: "#f87171", fontSize: 11, marginTop: 8 }}>Need: {t.missing.join(", ")}</div>}
-                  {t.done  && <div style={{ color: "#22c55e", fontSize: 12, fontWeight: 700, marginTop: 8 }}>🏆 COMPLETE!</div>}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* ═══ MANUAL ═══ */}
+      {/* ══ MANUAL ══ */}
       {tab === "manual" && (
-        <div style={css.body}>
-          <h3 style={css.secHd}>Add Score</h3>
-          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 32 }}>
-            <select style={css.sel} value={manualTeam} onChange={e => setMTeam(e.target.value)}>
+        <div style={S.body}>
+          <div style={S.modelNote}>
+            ℹ️ On Vercel, scores sync automatically from the MLB API. Use this tab to manually correct or add scores.
+          </div>
+          <h3 style={S.secHd}>Add Score</h3>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 28 }}>
+            <select style={S.sel} value={mTeam} onChange={e => setMTeam(e.target.value)}>
               {POOL_TEAMS.map(({ team }) => <option key={team}>{team}</option>)}
             </select>
-            <input style={css.inp} type="number" min={0} max={13} placeholder="0–13"
-              value={manualRun} onChange={e => setMRun(e.target.value)}
+            <input style={S.inp} type="number" min={0} max={13} placeholder="0–13"
+              value={mRun} onChange={e => setMRun(e.target.value)}
               onKeyDown={e => e.key === "Enter" && addManual()} />
-            <button style={css.addBtn} onClick={addManual}>Add</button>
+            <button style={S.addBtn} onClick={addManual}>Add</button>
           </div>
-          <h3 style={css.secHd}>Recorded Scores</h3>
-          <div style={css.tblWrap}>
-            <table style={css.tbl}>
+
+          <h3 style={S.secHd}>All Recorded Scores</h3>
+          <div style={S.tblWrap}>
+            <table style={S.tbl}>
               <thead>
                 <tr>
-                  <th style={{ ...css.th, textAlign: "left" }}>Team</th>
-                  <th style={{ ...css.th, textAlign: "left" }}>Owner</th>
-                  <th style={{ ...css.th, textAlign: "left" }}>Scores</th>
+                  <th style={{ ...S.th, textAlign: "left" }}>Team</th>
+                  <th style={{ ...S.th, textAlign: "left" }}>Owner</th>
+                  <th style={{ ...S.th, textAlign: "left" }}>Scores hit</th>
                 </tr>
               </thead>
               <tbody>
                 {POOL_TEAMS.map(({ team, owner }) => {
                   const hit = [...(scores[team] || [])].sort((a, b) => a - b);
                   return (
-                    <tr key={team} style={css.tr}>
-                      <td style={{ ...css.td, textAlign: "left" }}>
-                        <span style={{ ...css.dot, background: TEAM_COLORS[team] || "#555" }} /> {team}
+                    <tr key={team} style={S.tr}>
+                      <td style={{ ...S.td, textAlign: "left", fontSize: 11 }}>
+                        <span style={{ ...S.dot, background: TEAM_COLORS[team] || "#555" }} /> {team}
                       </td>
-                      <td style={{ ...css.td, textAlign: "left" }}>
-                        <span style={{ ...css.ownerTag, background: `hsl(${ownerHues[owner]},48%,24%)`, border: `1px solid hsl(${ownerHues[owner]},48%,38%)` }}>{owner}</span>
+                      <td style={{ ...S.td, textAlign: "left" }}>
+                        <span style={{ ...S.ownerTag, background: `hsl(${ownerHues[owner]},45%,22%)`, border: `1px solid hsl(${ownerHues[owner]},45%,35%)` }}>{owner}</span>
                       </td>
-                      <td style={{ ...css.td, textAlign: "left" }}>
-                        <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                      <td style={{ ...S.td, textAlign: "left" }}>
+                        <div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
                           {hit.map(r => (
-                            <span key={r} style={css.ePill}>
-                              {r}
-                              <button style={css.rmX} onClick={() => removeScore(team, r)}>×</button>
+                            <span key={r} style={S.ePill}>
+                              {r} <button style={S.rmX} onClick={() => removeScore(team, r)}>×</button>
                             </span>
                           ))}
                           {hit.length === 0 && <span style={{ color: "#334155" }}>—</span>}
@@ -509,82 +541,75 @@ export default function App() {
 
       {/* TOAST */}
       {toast && (
-        <div style={{
-          ...css.toast,
-          background: toast.type === "err" ? "#7f1d1d" : toast.type === "info" ? "#1e3a5f" : "#14532d",
-        }}>
+        <div style={{ ...S.toast, background: toast.type === "err" ? "#7f1d1d" : toast.type === "info" ? "#1e3a5f" : "#14532d" }}>
           {toast.msg}
         </div>
       )}
 
       <style>{`
         @keyframes spin  { to { transform: rotate(360deg); } }
-        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+        @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
+        * { box-sizing: border-box; }
         body { margin: 0; }
+        tr:hover { background: rgba(255,255,255,0.02) !important; }
       `}</style>
     </div>
   );
 }
 
 // ── Styles ────────────────────────────────────────────────────────────
-const css = {
-  wrap:      { fontFamily:"'IBM Plex Mono','Courier New',monospace", background:"#07101e", minHeight:"100vh", color:"#e2e8f0", paddingBottom:60 },
-  hdr:       { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"14px 20px", background:"#0b1828", borderBottom:"1px solid #1e293b", flexWrap:"wrap", gap:10 },
-  hdrL:      { display:"flex", alignItems:"center", gap:12 },
-  hdrR:      { display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" },
-  ttl:       { fontSize:20, fontWeight:700, color:"#f1f5f9", letterSpacing:"-0.5px" },
-  sub:       { fontSize:11, color:"#334155", marginTop:2 },
-  winBadge:  { background:"linear-gradient(90deg,#854d0e,#b45309)", color:"#fef08a", padding:"5px 12px", borderRadius:5, fontWeight:700, fontSize:12 },
-  liveBadge: { display:"flex", alignItems:"center", gap:5, background:"#1a0a0a", border:"1px solid #dc2626", color:"#f87171", padding:"4px 10px", borderRadius:5, fontSize:12, fontWeight:700 },
-  liveDot:   { width:7, height:7, borderRadius:"50%", background:"#ef4444", animation:"pulse 1.2s ease-in-out infinite" },
-  pollBar:   { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"7px 20px", background:"#090f1b", borderBottom:"1px solid #0f172a", flexWrap:"wrap", gap:8 },
-  pollL:     { display:"flex", alignItems:"center", gap:10, flexWrap:"wrap" },
-  pollR:     { display:"flex", alignItems:"center", gap:12 },
-  autoBtn:   { color:"#94a3b8", background:"#1e293b", border:"1px solid #334155", padding:"5px 11px", borderRadius:5, cursor:"pointer", fontSize:12, fontFamily:"inherit", fontWeight:600 },
-  autoBtnOn: { color:"#86efac", background:"#0f2b1a", border:"1px solid #16a34a" },
-  syncBtn:   { color:"#93c5fd", background:"#0f2040", border:"1px solid #2563eb", padding:"5px 11px", borderRadius:5, cursor:"pointer", fontSize:12, fontFamily:"inherit", fontWeight:600 },
+const S = {
+  wrap:      { fontFamily: "'IBM Plex Mono','Courier New',monospace", background: "#070e1a", minHeight: "100vh", color: "#e2e8f0", paddingBottom: 60 },
+  hdr:       { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"12px 18px", background:"#0a1525", borderBottom:"1px solid #1a2740", flexWrap:"wrap", gap:8 },
+  hdrL:      { display:"flex", alignItems:"center", gap:10 },
+  hdrR:      { display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" },
+  ttl:       { fontSize:18, fontWeight:700, color:"#f1f5f9", letterSpacing:"-0.5px" },
+  sub:       { fontSize:10, color:"#334155", marginTop:1 },
+  winBanner: { background:"linear-gradient(90deg,#78350f,#92400e)", color:"#fef08a", padding:"4px 10px", borderRadius:5, fontWeight:700, fontSize:11 },
+  livePill:  { display:"flex", alignItems:"center", gap:4, background:"#1a0a0a", border:"1px solid #dc2626", color:"#f87171", padding:"3px 8px", borderRadius:5, fontSize:11, fontWeight:700 },
+  liveDot:   { width:6, height:6, borderRadius:"50%", background:"#ef4444", animation:"pulse 1.2s infinite" },
+  pollBar:   { display:"flex", alignItems:"center", justifyContent:"space-between", padding:"6px 18px", background:"#060d18", borderBottom:"1px solid #0f172a", flexWrap:"wrap", gap:6 },
+  pollL:     { display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" },
+  pollR:     { display:"flex", alignItems:"center", gap:10 },
+  autoBtn:   { color:"#64748b", background:"#1e293b", border:"1px solid #334155", padding:"4px 10px", borderRadius:4, cursor:"pointer", fontSize:11, fontFamily:"inherit", fontWeight:600 },
+  autoBtnOn: { color:"#86efac", background:"#0a2015", border:"1px solid #16a34a" },
+  syncBtn:   { color:"#93c5fd", background:"#0a1a30", border:"1px solid #2563eb", padding:"4px 10px", borderRadius:4, cursor:"pointer", fontSize:11, fontFamily:"inherit", fontWeight:600 },
   spin:      { display:"inline-block", animation:"spin 0.8s linear infinite" },
-  cdWrap:    { display:"flex", alignItems:"center", gap:6, fontSize:11 },
-  cdLabel:   { color:"#475569" },
-  cdTrack:   { width:70, height:3, background:"#1e293b", borderRadius:2, overflow:"hidden" },
+  cdWrap:    { display:"flex", alignItems:"center", gap:5 },
+  cdTrack:   { width:60, height:3, background:"#1e293b", borderRadius:2, overflow:"hidden" },
   cdFill:    { height:3, background:"#3b82f6", borderRadius:2, transition:"width 1s linear" },
-  sleepNote: { fontSize:11, color:"#334155" },
-  ticker:    { display:"flex", alignItems:"center", gap:12, padding:"6px 20px", background:"#0a1520", borderBottom:"1px solid #1e293b", overflowX:"auto" },
-  tickHd:    { fontSize:9, fontWeight:700, color:"#ef4444", border:"1px solid #ef4444", padding:"1px 5px", borderRadius:3, whiteSpace:"nowrap" },
-  tickItem:  { display:"flex", alignItems:"center", gap:5, fontSize:12, whiteSpace:"nowrap", color:"#cbd5e1" },
-  covBar:    { display:"flex", alignItems:"center", gap:5, padding:"9px 20px", background:"#090f1b", borderBottom:"1px solid #0f172a", flexWrap:"wrap" },
-  covPill:   { width:32, height:32, borderRadius:5, display:"flex", flexDirection:"column", alignItems:"center", justifyContent:"center" },
-  tabRow:    { display:"flex", borderBottom:"1px solid #1e293b", padding:"0 20px", background:"#0b1828" },
-  tabBtn:    { background:"none", border:"none", color:"#334155", padding:"10px 16px", cursor:"pointer", fontSize:13, fontFamily:"inherit", fontWeight:600, borderBottom:"2px solid transparent" },
+  ticker:    { display:"flex", alignItems:"center", gap:10, padding:"5px 18px", background:"#09121e", borderBottom:"1px solid #1a2740", overflowX:"auto" },
+  tickLbl:   { fontSize:9, fontWeight:700, color:"#ef4444", border:"1px solid #ef4444", padding:"1px 4px", borderRadius:3, whiteSpace:"nowrap" },
+  tickItem:  { display:"flex", alignItems:"center", gap:4, fontSize:11, whiteSpace:"nowrap", color:"#cbd5e1" },
+  covBar:    { display:"flex", alignItems:"center", gap:4, padding:"7px 18px", background:"#060d18", borderBottom:"1px solid #0f172a", flexWrap:"wrap" },
+  covPill:   { width:28, height:28, borderRadius:4, display:"flex", alignItems:"center", justifyContent:"center", cursor:"default" },
+  tabRow:    { display:"flex", borderBottom:"1px solid #1a2740", padding:"0 18px", background:"#0a1525" },
+  tabBtn:    { background:"none", border:"none", color:"#334155", padding:"9px 14px", cursor:"pointer", fontSize:12, fontFamily:"inherit", fontWeight:600, borderBottom:"2px solid transparent" },
   tabOn:     { color:"#60a5fa", borderBottom:"2px solid #3b82f6" },
-  body:      { padding:"16px 20px" },
-  filterRow: { display:"flex", alignItems:"center", gap:5, flexWrap:"wrap", marginBottom:12 },
-  chip:      { background:"#1e293b", border:"1px solid #334155", color:"#64748b", padding:"2px 9px", borderRadius:20, cursor:"pointer", fontSize:11, fontFamily:"inherit" },
+  body:      { padding:"14px 18px" },
+  modelNote: { fontSize:10, color:"#94a3b8", background:"#0a1525", border:"1px solid #1a2740", borderRadius:5, padding:"8px 12px", marginBottom:14, lineHeight:1.6 },
+  filterRow: { display:"flex", alignItems:"center", gap:4, flexWrap:"wrap", marginBottom:10 },
+  chip:      { background:"#1e293b", border:"1px solid #334155", color:"#475569", padding:"2px 8px", borderRadius:20, cursor:"pointer", fontSize:10, fontFamily:"inherit" },
   chipOn:    { background:"#1d4ed8", color:"#bfdbfe", borderColor:"#3b82f6" },
-  tblWrap:   { overflowX:"auto", borderRadius:7, border:"1px solid #1e293b" },
-  tbl:       { width:"100%", borderCollapse:"collapse", fontSize:12 },
-  th:        { background:"#0b1828", color:"#334155", padding:"6px 8px", textAlign:"center", fontWeight:700, borderBottom:"1px solid #1e293b", whiteSpace:"nowrap", fontSize:11 },
-  tr:        { borderBottom:"1px solid #0f172a" },
-  td:        { padding:"5px 8px", textAlign:"center", verticalAlign:"middle" },
-  dot:       { width:9, height:9, borderRadius:"50%", display:"inline-block", flexShrink:0 },
-  ownerTag:  { padding:"1px 7px", borderRadius:3, fontSize:11, fontWeight:600, color:"#cbd5e1", whiteSpace:"nowrap" },
-  chk:       { color:"#22c55e", fontWeight:700, fontSize:13 },
-  dot2:      { color:"#1e293b", fontSize:16 },
-  liveCell:  { color:"#f59e0b", fontSize:11 },
-  liveScore: { color:"#fbbf24", fontWeight:700, fontSize:11, whiteSpace:"nowrap" },
-  newTag:    { background:"#14532d", color:"#86efac", fontSize:9, padding:"1px 4px", borderRadius:3, fontWeight:700 },
-  cardGrid:  { display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(310px,1fr))", gap:12 },
-  card:      { background:"#0c1525", border:"1px solid #1e293b", borderLeftWidth:3, borderRadius:8, padding:14 },
-  cardHdr:   { display:"flex", alignItems:"center", gap:7, marginBottom:7, flexWrap:"wrap" },
-  rankN:     { fontSize:14, fontWeight:700, color:"#1e293b", minWidth:26 },
-  prog:      { background:"#1e293b", borderRadius:3, height:4 },
-  progFill:  { height:4, borderRadius:3, transition:"width 0.6s ease" },
-  mpill:     { width:22, height:22, borderRadius:4, fontSize:10, fontWeight:700, display:"flex", alignItems:"center", justifyContent:"center" },
-  secHd:     { fontSize:12, fontWeight:700, color:"#334155", marginBottom:10, letterSpacing:1, textTransform:"uppercase" },
-  sel:       { background:"#1e293b", border:"1px solid #334155", color:"#e2e8f0", padding:"6px 10px", borderRadius:5, fontSize:12, fontFamily:"inherit" },
-  inp:       { background:"#1e293b", border:"1px solid #334155", color:"#e2e8f0", padding:"6px 10px", borderRadius:5, fontSize:12, fontFamily:"inherit", width:100 },
-  addBtn:    { background:"#14532d", border:"1px solid #16a34a", color:"#86efac", padding:"6px 14px", borderRadius:5, cursor:"pointer", fontSize:12, fontFamily:"inherit", fontWeight:600 },
-  ePill:     { background:"#1e293b", border:"1px solid #334155", padding:"2px 6px", borderRadius:3, fontSize:11, display:"flex", alignItems:"center", gap:3 },
-  rmX:       { background:"none", border:"none", color:"#f87171", cursor:"pointer", fontSize:12, padding:0, fontFamily:"inherit" },
-  toast:     { position:"fixed", bottom:18, right:18, padding:"10px 16px", borderRadius:7, color:"#fff", fontSize:13, fontWeight:600, zIndex:999, boxShadow:"0 4px 20px rgba(0,0,0,.6)", maxWidth:440 },
+  tblWrap:   { overflowX:"auto", borderRadius:6, border:"1px solid #1a2740" },
+  tbl:       { width:"100%", borderCollapse:"collapse", fontSize:11 },
+  th:        { background:"#0a1525", color:"#334155", padding:"5px 7px", textAlign:"center", fontWeight:700, borderBottom:"1px solid #1a2740", whiteSpace:"nowrap", fontSize:10 },
+  tr:        { borderBottom:"1px solid #0d1a2a" },
+  td:        { padding:"4px 7px", textAlign:"center", verticalAlign:"middle" },
+  dot:       { width:8, height:8, borderRadius:"50%", display:"inline-block", flexShrink:0 },
+  ownerTag:  { padding:"1px 6px", borderRadius:3, fontSize:10, fontWeight:600, color:"#94a3b8", whiteSpace:"nowrap" },
+  liveScore: { color:"#fbbf24", fontWeight:700, fontSize:10 },
+  newTag:    { background:"#14532d", color:"#86efac", fontSize:8, padding:"1px 3px", borderRadius:3, fontWeight:700 },
+  cardGrid:  { display:"grid", gridTemplateColumns:"repeat(auto-fill,minmax(290px,1fr))", gap:10 },
+  card:      { background:"#0b1828", border:"1px solid #1a2740", borderLeftWidth:3, borderRadius:7, padding:12 },
+  cardHdr:   { display:"flex", alignItems:"center", gap:6, marginBottom:8, flexWrap:"wrap" },
+  prog:      { background:"#1a2740", borderRadius:3, height:4 },
+  progFill:  { height:4, borderRadius:3, transition:"width 0.5s ease" },
+  secHd:     { fontSize:11, fontWeight:700, color:"#334155", marginBottom:8, letterSpacing:1, textTransform:"uppercase" },
+  sel:       { background:"#1e293b", border:"1px solid #334155", color:"#e2e8f0", padding:"5px 8px", borderRadius:4, fontSize:11, fontFamily:"inherit" },
+  inp:       { background:"#1e293b", border:"1px solid #334155", color:"#e2e8f0", padding:"5px 8px", borderRadius:4, fontSize:11, fontFamily:"inherit", width:90 },
+  addBtn:    { background:"#14532d", border:"1px solid #16a34a", color:"#86efac", padding:"5px 12px", borderRadius:4, cursor:"pointer", fontSize:11, fontFamily:"inherit", fontWeight:600 },
+  ePill:     { background:"#1e293b", border:"1px solid #334155", padding:"1px 5px", borderRadius:3, fontSize:10, display:"flex", alignItems:"center", gap:2 },
+  rmX:       { background:"none", border:"none", color:"#f87171", cursor:"pointer", fontSize:11, padding:0, fontFamily:"inherit" },
+  toast:     { position:"fixed", bottom:14, right:14, padding:"9px 14px", borderRadius:6, color:"#fff", fontSize:12, fontWeight:600, zIndex:999, boxShadow:"0 4px 16px rgba(0,0,0,.7)", maxWidth:400 },
 };
