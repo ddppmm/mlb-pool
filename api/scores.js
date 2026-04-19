@@ -58,8 +58,10 @@ export default async function handler(req, res) {
       }
     }
 
-    // Cache for 30s at the CDN edge — fresh enough for our 60s poll
-    res.setHeader("Cache-Control", "s-maxage=30, stale-while-revalidate=60");
+    // Past dates are immutable — cache for 24h. Today: 30s.
+    const isToday = date === new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+    const cacheAge = isToday ? 30 : 86400;
+    res.setHeader("Cache-Control", `s-maxage=${cacheAge}, stale-while-revalidate=${cacheAge * 2}`);
     res.status(200).json({
       date,
       totalGames: data.dates?.[0]?.totalGames ?? 0,
