@@ -224,12 +224,17 @@ function etToday() {
 }
 
 // All dates from pool start (April 17) through today in ET
+// Use string arithmetic to avoid timezone shifting issues with Date parsing
 function poolDates() {
-  const start = new Date("2026-04-17T00:00:00-04:00");
-  const today = new Date(new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }) + "T00:00:00");
+  const POOL_START = "2026-04-17";
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
   const dates = [];
-  for (let d = new Date(start); d <= today; d.setDate(d.getDate() + 1)) {
-    dates.push(d.toLocaleDateString("en-CA"));
+  // Walk day by day using UTC dates (plain YYYY-MM-DD strings, no timezone shift)
+  let cur = new Date(POOL_START + "T12:00:00Z"); // noon UTC = safe from any TZ shift
+  const end = new Date(today     + "T12:00:00Z");
+  while (cur <= end) {
+    dates.push(cur.toISOString().slice(0, 10));
+    cur.setUTCDate(cur.getUTCDate() + 1);
   }
   return dates;
 }
