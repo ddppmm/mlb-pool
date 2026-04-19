@@ -223,6 +223,17 @@ function etToday() {
   return new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
 }
 
+// All dates from pool start (April 17) through today in ET
+function poolDates() {
+  const start = new Date("2026-04-17T00:00:00-04:00");
+  const today = new Date(new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" }) + "T00:00:00");
+  const dates = [];
+  for (let d = new Date(start); d <= today; d.setDate(d.getDate() + 1)) {
+    dates.push(d.toLocaleDateString("en-CA"));
+  }
+  return dates;
+}
+
 async function fetchMLB(date) {
   // In artifact: try the MLB API directly (will likely fail due to sandbox restrictions)
   // In Vercel deployment: change this to `/api/scores?date=${date}`
@@ -327,8 +338,36 @@ export default function App() {
     }, POLL_MS);
   }, [doFetch]);
 
+  // On startup: fetch all dates since pool start to catch up on missed days
   useEffect(() => {
-    doFetch(true); schedule();
+    const catchUp = async () => {
+      setFetching(true);
+      const dates = poolDates();
+      // Fetch all dates in parallel
+      const results = await Promise.allSettled(dates.map(d => fetchMLB(d)));
+      const allFinals = {};
+      results.forEach(r => {
+        if (r.status === "fulfilled") {
+          Object.entries(r.value.finals).forEach(([team, score]) => {
+            if (!allFinals[team]) allFinals[team] = new Set();
+            allFinals[team].add(score);
+          });
+          // Set live from today's result (last date)
+          if (r === results[results.length - 1]) setLiveNow(r.value.live);
+        }
+      });
+      setScores(prev => {
+        const next = {};
+        POOL_TEAMS.forEach(({ team }) => {
+          next[team] = new Set([...(prev[team] || []), ...(allFinals[team] || [])]);
+        });
+        return next;
+      });
+      setLastFetch(new Date());
+      setFetching(false);
+    };
+    catchUp().catch(() => setFetching(false));
+    schedule();
     return () => { clearTimeout(timerRef.current); clearInterval(cdRef.current); };
   }, []); // eslint-disable-line
 
