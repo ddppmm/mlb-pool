@@ -35,7 +35,7 @@ const POOL_TEAMS = [
 
 const INITIAL_SCORES = {
   Angels: [7], Astros: [4], "Blue Jays": [3], Braves: [9],
-  Brewers: [7], Cardinals: [9], Cubs: [11], Diamondbacks: [6],
+  Brewers: [7], Cardinals: [9], Cubs: [12], Diamondbacks: [6],
   Dodgers: [7], Giants: [11], Guardians: [4], Mariners: [0],
   Marlins: [5], Mets: [4], Nationals: [5], Athletics: [2],
   Orioles: [6], Padres: [0], Phillies: [0], Pirates: [5],
