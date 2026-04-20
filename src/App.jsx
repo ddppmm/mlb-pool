@@ -33,16 +33,7 @@ const POOL_TEAMS = [
   { team: "Yankees",      owner: "MURPH/RICK"  },
 ];
 
-const INITIAL_SCORES = {
-  Angels: [7], Astros: [4], "Blue Jays": [3], Braves: [9],
-  Brewers: [7], Cardinals: [9], Cubs: [12], Diamondbacks: [6],
-  Dodgers: [7], Giants: [11], Guardians: [4], Mariners: [0],
-  Marlins: [5], Mets: [4], Nationals: [5], Athletics: [2],
-  Orioles: [6], Padres: [0], Phillies: [0], Pirates: [5],
-  Rangers: [5], "Red Sox": [1], Reds: [3], Rockies: [1],
-  Royals: [3], Rays: [1], Tigers: [0], Twins: [1],
-  "White Sox": [9], Yankees: [4],
-};
+const INITIAL_SCORES = {};
 
 const ALL_RUNS  = Array.from({ length: 14 }, (_, i) => i);
 const POLL_MS   = 60_000;
