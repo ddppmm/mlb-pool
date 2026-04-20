@@ -47,6 +47,9 @@ export default async function handler(req, res) {
       const inning   = game.linescore?.currentInning   ?? null;
       const half     = game.linescore?.inningHalf       ?? null;
 
+      // Debug log every game
+      console.log(`[${date}] ${state} | ${awayName} ${away?.score ?? '?'} @ ${homeName} ${home?.score ?? '?'}`);
+
       if (state === "Final") {
         if (awayName && away?.score != null) finals[awayName] = away.score;
         if (homeName && home?.score != null) finals[homeName] = home.score;
